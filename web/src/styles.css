@@ -88,8 +88,11 @@ table.schema td { white-space: normal; vertical-align: top; }
 .builder-preview { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; position: sticky; top: 12px; min-width: 0; }
 pre.sql { background: #f2f4f7; padding: 8px; border-radius: 6px; white-space: pre-wrap; font-size: 12px; }
 
-.dashboard-layout.with-chat { display: grid; grid-template-columns: 1fr 380px; }
-.chat { border-left: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0; padding: 14px; }
+.dashboard-layout.with-chat { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.chat { width: var(--chat-width, 380px); border-left: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; height: 100vh; position: sticky; top: 0; padding: 14px; }
+.chat-resizer { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 2; touch-action: none; }
+.chat-resizer:hover, .chat-resizer:focus-visible, body.resizing .chat-resizer { background: linear-gradient(to right, transparent 3px, var(--primary) 3px, var(--primary) 5px, transparent 5px); outline: none; }
+body.resizing { cursor: col-resize; user-select: none; }
 .chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .msg { padding: 8px 10px; border-radius: var(--radius); }
 .msg.user { background: #e8effa; align-self: flex-end; max-width: 90%; }
@@ -106,7 +109,8 @@ button.link.danger-text { color: var(--danger); }
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .span-3, .span-4 { grid-column: span 2; }
   .dashboard-layout.with-chat { grid-template-columns: 1fr; }
-  .chat { height: auto; position: static; border-left: none; border-top: 1px solid var(--border); }
+  .chat { width: auto; height: auto; position: static; border-left: none; border-top: 1px solid var(--border); }
+  .chat-resizer { display: none; }
   .builder { grid-template-columns: 1fr; }
 }
 @media (max-width: 700px) {

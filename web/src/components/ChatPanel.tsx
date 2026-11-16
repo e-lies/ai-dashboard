@@ -35,6 +35,73 @@ import { ResultView } from './ResultView';
 const MAX_ATTEMPTS = 3;
 const NO_MESSAGES: Message[] = [];
 
+// Largeur du panneau : réglable à la souris ou au clavier, mémorisée dans ce navigateur.
+const WIDTH_KEY = 'tq-dashboard:chat-width';
+const DEFAULT_WIDTH = 380;
+const MIN_WIDTH = 300;
+const maxWidth = () => Math.max(MIN_WIDTH, Math.min(1000, Math.round(window.innerWidth * 0.7)));
+const clampWidth = (w: number) => Math.round(Math.min(maxWidth(), Math.max(MIN_WIDTH, w)));
+
+function readWidth(): number {
+  try {
+    const w = Number(localStorage.getItem(WIDTH_KEY));
+    return w ? clampWidth(w) : DEFAULT_WIDTH;
+  } catch {
+    return DEFAULT_WIDTH;
+  }
+}
+
+function useChatWidth() {
+  const [width, setWidth] = useState(readWidth);
+  useEffect(() => {
+    try {
+      localStorage.setItem(WIDTH_KEY, String(width));
+    } catch {
+      // Stockage indisponible (navigation privée, etc.) : la largeur n'est simplement pas mémorisée.
+    }
+  }, [width]);
+
+  const handleProps = {
+    role: 'separator',
+    'aria-orientation': 'vertical' as const,
+    'aria-label': 'Largeur du chat',
+    'aria-valuenow': width,
+    'aria-valuemin': MIN_WIDTH,
+    'aria-valuemax': maxWidth(),
+    tabIndex: 0,
+    title: 'Glisser pour changer la largeur (double-clic : largeur par défaut)',
+    onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+      e.preventDefault();
+      const startX = e.clientX;
+      const start = width;
+      const el = e.currentTarget;
+      el.setPointerCapture(e.pointerId);
+      document.body.classList.add('resizing');
+      // Le panneau est à droite : glisser vers la gauche l'élargit.
+      const move = (ev: PointerEvent) => setWidth(clampWidth(start + startX - ev.clientX));
+      const up = () => {
+        el.removeEventListener('pointermove', move);
+        el.removeEventListener('pointerup', up);
+        el.removeEventListener('pointercancel', up);
+        document.body.classList.remove('resizing');
+      };
+      el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up);
+      el.addEventListener('pointercancel', up);
+    },
+    onDoubleClick: () => setWidth(clampWidth(DEFAULT_WIDTH)),
+    onKeyDown(e: React.KeyboardEvent) {
+      const step = e.shiftKey ? 80 : 20;
+      if (e.key === 'ArrowLeft') setWidth((w) => clampWidth(w + step));
+      else if (e.key === 'ArrowRight') setWidth((w) => clampWidth(w - step));
+      else if (e.key === 'Home') setWidth(clampWidth(DEFAULT_WIDTH));
+      else return;
+      e.preventDefault();
+    },
+  };
+  return { width, handleProps };
+}
+
 type Correction = NonNullable<ChatPlanRequest['valueCorrections']>[number];
 type Outcome = { plan: Plan; result: QueryResult } | null;
 
@@ -69,6 +136,7 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const { width, handleProps } = useChatWidth();
 
   // Discussions enregistrées (sur un dashboard seulement). Rien n'est enregistré sans action de l'utilisateur.
   const [threads, setThreads] = useState<ChatThread[]>([]);
@@ -350,7 +418,8 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
   }
 
   return (
-    <aside className="chat">
+    <aside className="chat" style={{ '--chat-width': `${width}px` } as React.CSSProperties}>
+      <div className="chat-resizer" {...handleProps} />
       <h3>Questions sur les données</h3>
       <p className="hint chat-scope">
         {!dashboard
