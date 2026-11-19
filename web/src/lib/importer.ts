@@ -1,6 +1,6 @@
 /**
  * Orchestration de l'import : matrice brute → profilage heuristique →
- * raffinement par l'IA → normalisation → statistiques.
+ * raffinement par l'IA locale (facultatif) → normalisation → statistiques.
  */
 import { nanoid } from 'nanoid';
 import type { CellValue, ColumnSchema, DatasetMeta } from '../../../shared/types';
@@ -8,7 +8,10 @@ import { api } from './api';
 import type { RawTable } from './ingest';
 import { computeStats, isNullish, normalizeRows, profileTable, type HeuristicColumn } from './profile';
 
-/** Envoie au LLM le nom des colonnes et un échantillon masqué ; jamais de lignes complètes. */
+/**
+ * Envoie à l'IA locale (jamais à l'IA infonuagique) le nom des colonnes et un échantillon masqué ;
+ * jamais de lignes complètes, ni d'échantillon pour les colonnes sensibles.
+ */
 export async function refineWithAi(
   datasetName: string,
   table: RawTable,

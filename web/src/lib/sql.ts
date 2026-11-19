@@ -76,8 +76,11 @@ function compileFilter(f: Filter, meta: DatasetMeta): string {
       const nonNull = vals.filter((v) => v !== null);
       const hasNull = vals.length !== nonNull.length;
       const list = nonNull.length ? `${c} IN (${nonNull.map(lit).join(', ')})` : 'FALSE';
-      const expr = hasNull ? `(${list} OR ${c} IS NULL)` : list;
-      return f.op === 'in' ? expr : `NOT ${expr}`;
+      if (f.op === 'in') return hasNull ? `(${list} OR ${c} IS NULL)` : list;
+      // « hors de » conserve les nulls, sauf si « (vide) » fait partie des valeurs exclues.
+      // (NOT x IN (…) vaut NULL pour une valeur nulle, ce qui l'exclurait : le cas est donc traité à part.)
+      const notList = nonNull.length ? `${c} NOT IN (${nonNull.map(lit).join(', ')})` : 'TRUE';
+      return hasNull ? `(${c} IS NOT NULL AND ${notList})` : `(${c} IS NULL OR ${notList})`;
     }
   }
 }
@@ -172,14 +175,20 @@ export const OP_LABELS: Record<Filter['op'], string> = {
 };
 
 /**
- * Description lisible d'un filtre, envoyée au LLM et affichée dans le chat.
- * Pour une colonne sensible, la valeur filtrée est omise (elle ne doit pas quitter le navigateur).
+ * Description lisible d'un filtre, affichée dans le chat.
+ * `hideValues` omet les valeurs filtrées : c'est la forme envoyée au LLM, qui ne reçoit jamais de valeur des données.
+ * `hideSensitive` ne les omet que pour les colonnes sensibles.
  */
-export function describeFilter(f: Filter, meta: DatasetMeta, { hideSensitive = false } = {}): string {
+export function describeFilter(
+  f: Filter,
+  meta: DatasetMeta,
+  { hideSensitive = false, hideValues = false } = {},
+): string {
   const col = meta.columns.find((c) => c.id === f.columnId);
   const name = col?.name ?? f.columnId;
   const op = OP_LABELS[f.op];
   if (f.op === 'isNull' || f.op === 'notNull') return `${name} ${op}`;
+  if (hideValues) return `${name} ${f.op === 'between' ? 'entre deux bornes' : op} (valeurs non communiquées)`;
   if (hideSensitive && col?.sensitive) return `${name} ${op} (valeur masquée)`;
   const show = (v: Filter['value']) => (v === null || v === undefined ? '(vide)' : `« ${String(v)} »`);
   if (f.op === 'between') return `${name} entre ${show(f.values?.[0])} et ${show(f.values?.[1])}`;
@@ -195,8 +204,10 @@ export function compileQuery(spec: QuerySpec, meta: DatasetMeta, globalFilters: 
   // Mode lignes brutes.
   if (spec.groupBy.length === 0 && spec.measures.length === 0) {
     const cols = (spec.columns?.length ? spec.columns : meta.columns.map((c) => c.id)).map((id) => columnOf(meta, id));
+    // Un tri sur une clé qui n'est plus une colonne affichée (ex. ancienne mesure) est ignoré.
     const order = (spec.sort ?? [])
-      .map((s) => `${ident(columnOf(meta, s.by).id)} ${s.dir.toUpperCase()} NULLS LAST`)
+      .filter((s) => cols.some((c) => c.id === s.by))
+      .map((s) => `${ident(s.by)} ${s.dir.toUpperCase()} NULLS LAST`)
       .join(', ');
     const limit = Math.min(spec.rowLimit ?? DEFAULT_ROW_LIMIT, MAX_RESULT_ROWS);
     return {
@@ -235,13 +246,12 @@ export function compileQuery(spec: QuerySpec, meta: DatasetMeta, globalFilters: 
   const groupClause = spec.groupBy.length ? `GROUP BY ${spec.groupBy.map((_, i) => i + 1).join(', ')}` : '';
 
   const validKeys = new Set([...spec.groupBy.map((_, i) => `g${i}`), ...spec.measures.map((m) => m.id)]);
-  let order: string;
-  if (spec.sort?.length) {
-    order = spec.sort
-      .filter((s) => validKeys.has(s.by))
-      .map((s) => `${ident(s.by)} ${s.dir.toUpperCase()} NULLS LAST`)
-      .join(', ');
-  } else {
+  // Tri demandé (clé de groupe gN ou id de mesure) ; les clés devenues invalides sont ignorées.
+  let order = (spec.sort ?? [])
+    .filter((s) => validKeys.has(s.by))
+    .map((s) => `${ident(s.by)} ${s.dir.toUpperCase()} NULLS LAST`)
+    .join(', ');
+  if (!order) {
     // Par défaut : temps croissant, sinon première mesure décroissante.
     const temporalIdx = spec.groupBy.findIndex((g) => columnOf(meta, g.columnId).type === 'date');
     order =

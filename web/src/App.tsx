@@ -52,7 +52,7 @@ export function App() {
                 </select>
               </label>
             </div>
-            <DataTable key={homeMeta.id} meta={homeMeta} />
+            <DataTable key={`${homeMeta.id}:${homeMeta.updatedAt ?? ''}`} meta={homeMeta} />
           </section>
         )}
       </div>

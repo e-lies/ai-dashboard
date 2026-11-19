@@ -1,6 +1,10 @@
 import type { ColumnSchema, DatasetMeta, Filter, FilterOp } from '../../../shared/types';
+import { parseInput } from '../lib/multiValue';
 import { OP_LABELS } from '../lib/sql';
+import { MultiValueSelect } from './MultiValueSelect';
 
+/** Opérateurs à plusieurs valeurs choisies dans une liste. */
+const LIST_OPS: FilterOp[] = ['in', 'notIn'];
 
 function opsFor(col: ColumnSchema): FilterOp[] {
   switch (col.type) {
@@ -15,16 +19,16 @@ function opsFor(col: ColumnSchema): FilterOp[] {
   }
 }
 
-/** Convertit la saisie selon le type de la colonne. « (vide) » désigne la valeur nulle. */
-function parseInput(raw: string, col: ColumnSchema): string | number | boolean | null {
-  const s = raw.trim();
-  if (s === '(vide)') return null;
-  if (col.type === 'number' || col.type === 'integer') {
-    const n = Number(s.replace(/\s/g, '').replace(',', '.'));
-    return Number.isFinite(n) ? n : null;
-  }
-  if (col.type === 'boolean') return /^(oui|vrai|true|1)$/i.test(s);
-  return s;
+/**
+ * Changement d'opérateur : la valeur saisie est conservée quand c'est possible
+ * (« = Montréal » devient « parmi Montréal », et inversement avec la première valeur).
+ */
+function changeOp(f: Filter, op: FilterOp): Partial<Filter> {
+  const toList = LIST_OPS.includes(op);
+  const fromList = LIST_OPS.includes(f.op);
+  if (toList && !fromList) return { op, values: f.value !== undefined ? [f.value] : [], value: undefined };
+  if (!toList && fromList && op !== 'between') return { op, value: f.values?.[0], values: undefined };
+  return { op };
 }
 
 const MULTI: FilterOp[] = ['in', 'notIn', 'between'];
@@ -63,14 +67,17 @@ export function FilterEditor({ meta, filters, onChange }: Props) {
                 </option>
               ))}
             </select>
-            <select value={f.op} onChange={(e) => update(i, { op: e.target.value as FilterOp })}>
+            <select value={f.op} onChange={(e) => update(i, changeOp(f, e.target.value as FilterOp))}>
               {opsFor(col).map((op) => (
                 <option key={op} value={op}>
                   {OP_LABELS[op]}
                 </option>
               ))}
             </select>
-            {f.op !== 'isNull' && f.op !== 'notNull' && (
+            {LIST_OPS.includes(f.op) && (
+              <MultiValueSelect meta={meta} col={col} values={f.values ?? []} onChange={(values) => update(i, { values })} />
+            )}
+            {f.op !== 'isNull' && f.op !== 'notNull' && !LIST_OPS.includes(f.op) && (
               <>
                 <input
                   key={`${f.columnId}-${f.op}`}

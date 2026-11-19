@@ -5,8 +5,9 @@
 import { nanoid } from 'nanoid';
 import { create } from 'zustand';
 import type { CellValue, DashboardSpec, DatasetMeta, Filter, WidgetSpec } from '../../shared/types';
-import { dropDataset, isLoaded, loadDataset } from './lib/db';
+import { dropDataset, forgetDashboardViews, isLoaded, loadDataset } from './lib/db';
 import { storage } from './lib/storage';
+import { forgetDistinctValues } from './lib/valueMatch';
 
 type View = { kind: 'home' } | { kind: 'import' } | { kind: 'dataset'; id: string } | { kind: 'dashboard'; id: string };
 
@@ -23,6 +24,8 @@ interface AppState {
   ensureLoaded(datasetId: string): Promise<void>;
   addDataset(meta: DatasetMeta, rows: CellValue[][]): Promise<void>;
   updateDatasetMeta(meta: DatasetMeta): Promise<void>;
+  /** Remplace les lignes d'un jeu de données (même schéma) et recalcule tout ce qui en dépend. */
+  replaceDatasetData(meta: DatasetMeta, rows: CellValue[][]): Promise<void>;
   deleteDataset(id: string): Promise<void>;
 
   createDashboard(datasetId: string, name: string): Promise<DashboardSpec>;
@@ -83,6 +86,18 @@ export const useApp = create<AppState>((set, get) => ({
     set((s) => ({ datasets: s.datasets.map((d) => (d.id === meta.id ? meta : d)) }));
   },
 
+  async replaceDatasetData(meta, rows) {
+    // DuckDB d'abord : si le chargement échoue, le stockage garde les anciennes lignes.
+    await loadDataset(meta, rows);
+    await storage.saveDataset(meta, rows);
+    forgetDistinctValues(meta.id);
+    forgetDashboardViews();
+    set((s) => ({
+      datasets: s.datasets.map((d) => (d.id === meta.id ? meta : d)),
+      dataVersion: s.dataVersion + 1,
+    }));
+  },
+
   async deleteDataset(id) {
     const linked = get().dashboards.filter((d) => d.datasetId === id);
     await Promise.all(linked.map((d) => storage.deleteDashboard(d.id)));
@@ -110,8 +125,10 @@ export const useApp = create<AppState>((set, get) => ({
 
   async saveDashboard(d) {
     const updated = { ...d, updatedAt: new Date().toISOString() };
-    await storage.saveDashboard(updated);
+    // État mis à jour avant l'écriture dans IndexedDB : deux modifications rapprochées (ex. cocher deux valeurs
+    // d'un filtre) partent ainsi chacune de l'état le plus récent, sans en perdre une.
     set((s) => ({ dashboards: s.dashboards.map((x) => (x.id === d.id ? updated : x)) }));
+    await storage.saveDashboard(updated);
   },
 
   async deleteDashboard(id) {

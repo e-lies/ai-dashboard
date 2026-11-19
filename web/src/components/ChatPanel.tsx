@@ -1,7 +1,8 @@
 /**
- * Chatbot d'analyse. Le LLM ne voit que le schéma et des statistiques ;
- * il produit une requête SQL exécutée localement par DuckDB, puis rédige la
- * réponse à partir du résultat agrégé.
+ * Chatbot d'analyse. L'IA infonuagique ne reçoit que le schéma (noms, types, rôles et
+ * descriptions des colonnes) : elle produit une requête SQL et une phrase de
+ * présentation. La requête est exécutée localement par DuckDB ; son résultat
+ * n'est jamais renvoyé à l'IA infonuagique, seulement à l'IA locale qui rédige la réponse.
  *
  * Les valeurs texte utilisées par le SQL (ex. une région) sont vérifiées
  * localement : une valeur absente est corrigée si une valeur réelle lui est
@@ -15,6 +16,11 @@ import { api } from '../lib/api';
 import {
   cleanThreadName,
   defaultThreadName,
+  historyFor,
+  isRefreshable,
+  isStale,
+  redactDbError,
+  schemaContext,
   sortThreads,
   THREAD_NAME_MAX,
   type ChatMessage as Message,
@@ -24,9 +30,9 @@ import {
   type Scope,
   type Suggestion,
 } from '../lib/chatThreads';
-import { ensureDashboardView, runSql, runUntrustedSql } from '../lib/db';
+import { ensureDashboardView, runUntrustedSql } from '../lib/db';
 import { looksEmpty, replaceSqlLiteral } from '../lib/fuzzy';
-import { dashboardViewName, describeFilter, ident, isComplete, tableName } from '../lib/sql';
+import { dashboardViewName, describeFilter, isComplete, tableName } from '../lib/sql';
 import { storage } from '../lib/storage';
 import { checkLiterals } from '../lib/valueMatch';
 import { useApp } from '../store';
@@ -102,28 +108,10 @@ function useChatWidth() {
   return { width, handleProps };
 }
 
-type Correction = NonNullable<ChatPlanRequest['valueCorrections']>[number];
+/** Valeur demandée remplacée par une valeur réelle de la colonne (corrigée localement, jamais envoyée à l'IA). */
+type Correction = { columnId: string; requested: string; actual: string };
 type Outcome = { plan: Plan; result: QueryResult } | null;
 
-/** Contexte envoyé au LLM : aucune ligne, et rien de plus que le nom et le type pour les colonnes sensibles. */
-function schemaContext(meta: DatasetMeta): ChatPlanRequest['columns'] {
-  return meta.columns.map((c) =>
-    c.sensitive
-      ? { id: c.id, name: c.name, type: c.type, role: c.role }
-      : {
-          id: c.id,
-          name: c.name,
-          type: c.type,
-          role: c.role,
-          description: c.description ?? null,
-          nullCount: c.stats?.nullCount,
-          distinctCount: c.stats?.distinctCount,
-          min: c.stats?.min ?? null,
-          max: c.stats?.max ?? null,
-          topValues: c.stats?.topValues.map((v) => v.value),
-        },
-  );
-}
 
 /**
  * Sur un dashboard, le chat interroge la vue filtrée du dashboard : il répond selon les filtres actifs,
@@ -233,73 +221,82 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
 
   /** Prépare la table interrogée selon les filtres actifs du dashboard au moment de la question. */
   async function prepareScope(): Promise<Scope> {
-    if (!dashboard) return { table: tableName(meta.id), rowCount: meta.rowCount, activeFilters: [], labels: [] };
+    if (!dashboard) return { table: tableName(meta.id), activeFilters: [], labels: [] };
     await ensureDashboardView(dashboard.id, meta, filters);
-    const table = dashboardViewName(dashboard.id);
-    const [count] = await runSql(`SELECT COUNT(*) AS n FROM ${ident(table)}`);
     return {
-      table,
-      rowCount: Number(count?.n ?? 0),
-      activeFilters: filters.map((f) => describeFilter(f, meta, { hideSensitive: true })),
+      table: dashboardViewName(dashboard.id),
+      // Le LLM apprend quelles colonnes sont filtrées, et comment, mais pas les valeurs.
+      activeFilters: filters.map((f) => describeFilter(f, meta, { hideValues: true })),
       labels: filterLabels,
     };
   }
 
   /** Planifie puis exécute, avec jusqu'à 3 tentatives si le SQL échoue. Retourne null si un message a été affiché. */
-  async function planAndRun(
-    question: string,
-    history: History,
-    scope: Scope,
-    valueCorrections: Correction[] | null,
-  ): Promise<Outcome> {
+  async function planAndRun(question: string, history: History, scope: Scope): Promise<Outcome> {
     let previousError: ChatPlanRequest['previousError'] = null;
+    let lastError = '';
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const plan = await api.chatPlan({
         question,
         table: scope.table,
-        rowCount: scope.rowCount,
         activeFilters: scope.activeFilters,
         columns: schemaContext(meta),
         history,
         previousError,
-        valueCorrections,
       });
+      if (plan.kind === 'unanswerable') {
+        // Impossible avec ces colonnes : rien n'est exécuté et l'IA locale n'est pas appelée.
+        const alternative = plan.alternative?.trim();
+        push({
+          role: 'assistant',
+          text: plan.message,
+          explanation: plan.message,
+          unanswerable: true,
+          ...(alternative ? { alternative } : {}),
+        });
+        return null;
+      }
       if (plan.kind === 'clarify' || !plan.sql) {
-        push({ role: 'assistant', text: plan.message });
+        // Question de précision : la réponse de l'utilisateur repartira avec cet échange dans l'historique.
+        push({ role: 'assistant', text: plan.message, explanation: plan.message });
         return null;
       }
       try {
-        return { plan: { ...plan, sql: plan.sql }, result: await runUntrustedSql(plan.sql) };
+        // modelSql garde le SQL tel qu'écrit par le LLM, avant toute correction de valeur faite localement.
+        return { plan: { ...plan, sql: plan.sql, modelSql: plan.sql }, result: await runUntrustedSql(plan.sql) };
       } catch (e) {
-        previousError = { sql: plan.sql, error: (e as Error).message };
+        lastError = (e as Error).message;
+        // Les messages de DuckDB peuvent citer des valeurs des données : elles sont retirées avant l'envoi.
+        previousError = { sql: plan.sql, error: redactDbError(lastError) };
       }
     }
-    push({ role: 'assistant', text: `Je n’ai pas réussi à calculer la réponse (${previousError?.error}).`, error: true });
+    push({ role: 'assistant', text: `Je n’ai pas réussi à calculer la réponse (${lastError}).`, error: true });
     return null;
   }
 
   /**
-   * Applique des corrections de valeurs : remplacement direct du littéral dans le SQL, sans appel au LLM.
-   * Si un littéral est introuvable dans le SQL, nouvelle planification avec les corrections, sauf pour
-   * les colonnes sensibles, dont les valeurs ne quittent jamais le navigateur (la correction est alors abandonnée).
+   * Applique des corrections de valeurs en remplaçant directement le littéral dans le SQL, sans appel au LLM :
+   * les valeurs réelles des données ne lui sont jamais envoyées. Si le littéral est introuvable dans le SQL,
+   * l'utilisateur est invité à reformuler sa question avec la valeur existante.
    */
-  async function applyCorrections(
-    question: string,
-    history: History,
-    scope: Scope,
-    plan: Plan,
-    corrections: Correction[],
-  ): Promise<Outcome> {
+  async function applyCorrections(plan: Plan, corrections: Correction[]): Promise<Outcome> {
     let sql = plan.sql;
-    let needsReplan = false;
+    const failed: Correction[] = [];
     for (const c of corrections) {
       const replaced = replaceSqlLiteral(sql, c.requested, c.actual);
       if (replaced) sql = replaced;
-      else if (!meta.columns.find((col) => col.id === c.columnId)?.sensitive) needsReplan = true;
+      else failed.push(c);
     }
-    if (needsReplan) {
-      const shareable = corrections.filter((c) => !meta.columns.find((col) => col.id === c.columnId)?.sensitive);
-      return planAndRun(question, history, scope, shareable);
+    if (failed.length) {
+      const list = failed
+        .map((c) => `« ${c.requested} » → « ${c.actual} » (${meta.columns.find((x) => x.id === c.columnId)?.name ?? ''})`)
+        .join(', ');
+      push({
+        role: 'assistant',
+        text: `Je n’ai pas pu appliquer automatiquement la valeur existante : ${list}. Reformulez votre question avec cette valeur.`,
+        local: true,
+      });
+      return null;
     }
     const literals = plan.literals.map((l) => {
       const c = corrections.find((x) => x.columnId === l.columnId && x.requested === l.value);
@@ -308,7 +305,36 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
     return { plan: { ...plan, sql, literals }, result: await runUntrustedSql(sql) };
   }
 
-  /** Vérifie les valeurs demandées, corrige ce qui est sûr, puis rédige la réponse ou propose des valeurs proches. */
+  /**
+   * Rédaction de la réponse par l'IA locale, à partir du résultat (50 lignes au plus). Sans IA locale, ou en cas
+   * d'échec, la phrase de présentation produite avec le SQL est utilisée.
+   */
+  async function answerLocally(
+    question: string,
+    plan: Pick<Plan, 'sql' | 'message'>,
+    result: QueryResult,
+    scope: Scope,
+    notes: string[],
+  ) {
+    const { localModel } = await api.capabilities();
+    if (!localModel) return plan.message;
+    try {
+      const { answer } = await api.chatAnswer({
+        question,
+        sql: plan.sql,
+        result: result.rows.slice(0, 50),
+        truncated: result.truncated || result.rows.length > 50,
+        activeFilters: scope.labels,
+        notes: notes.filter((n) => n.includes('interprété')),
+      });
+      return answer.trim() || plan.message;
+    } catch (e) {
+      notes.push(`Réponse non rédigée : l’IA locale n’a pas répondu (${(e as Error).message.replace(/\.+$/, '')}).`);
+      return plan.message;
+    }
+  }
+
+  /** Vérifie les valeurs demandées, corrige ce qui est sûr, puis affiche le résultat ou propose des valeurs proches. */
   async function resolveAndAnswer(question: string, history: History, scope: Scope, plan: Plan, result: QueryResult) {
     const notes: string[] = [];
     if (scope.labels.length) notes.push(`Filtres du dashboard appliqués : ${scope.labels.join(' ; ')}.`);
@@ -317,9 +343,6 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
     const autos = checks.filter((c) => c.auto);
     if (autos.length) {
       const corrected = await applyCorrections(
-        question,
-        history,
-        scope,
         plan,
         autos.map((c) => ({ columnId: c.column.id, requested: c.requested, actual: c.auto! })),
       );
@@ -349,19 +372,73 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
         notes,
         suggestions,
         pending,
+        local: true,
       });
       return;
     }
 
-    // Seul le résultat (tronqué à 50 lignes) est renvoyé au LLM pour rédiger la réponse.
-    const { answer } = await api.chatAnswer({
-      question,
+    // Le résultat n'est jamais envoyé à l'IA infonuagique. Si une IA locale est configurée, c'est elle qui rédige
+    // la réponse à partir du résultat ; sinon, le résultat est affiché sous la phrase de présentation du SQL.
+    const text = await answerLocally(question, plan, result, scope, notes);
+    if (looksEmpty(result.rows)) notes.push('La requête ne renvoie aucun résultat.');
+    else if (result.truncated) notes.push('Résultat tronqué : seules les premières lignes sont affichées.');
+    push({
+      role: 'assistant',
+      // `text` (rédigé localement, avec des chiffres) n'est jamais renvoyé à l'IA infonuagique : seul `explanation` l'est.
+      text,
+      explanation: plan.message,
+      modelSql: plan.modelSql,
       sql: plan.sql,
-      result: result.rows.slice(0, 50),
-      truncated: result.truncated || result.rows.length > 50,
-      activeFilters: scope.activeFilters,
+      chart: plan.chart,
+      result,
+      question,
+      notes,
+      suggestions,
+      pending,
+      computedAt: new Date().toISOString(),
+      computedFilters: scope.labels,
     });
-    push({ role: 'assistant', text: answer, sql: plan.sql, chart: plan.chart, result, question, notes, suggestions, pending });
+  }
+
+  /**
+   * Actualise les résultats de la discussion : chaque SQL enregistré est réexécuté sur les données et les filtres
+   * actuels, sans nouvel appel à l'IA infonuagique. Si une IA locale est configurée, elle rédige de nouveau la réponse.
+   * Les modifications ne sont enregistrées qu'au prochain « Enregistrer », comme le reste de la discussion.
+   */
+  function refreshResults() {
+    return run(async () => {
+      const scope = await prepareScope();
+      const now = new Date().toISOString();
+      const date = new Date(now).toLocaleDateString('fr-CA');
+      const updated = new Map<string, Message>();
+      for (const m of messages) {
+        if (!isRefreshable(m)) continue;
+        try {
+          const result = await runUntrustedSql(m.sql!);
+          // Les valeurs interprétées (« montreal » → « Montréal ») restent valables : le SQL les contient déjà.
+          const notes = [
+            ...(scope.labels.length ? [`Filtres du dashboard appliqués : ${scope.labels.join(' ; ')}.`] : []),
+            ...(m.notes ?? []).filter((n) => n.includes('interprété')),
+          ];
+          // Une réponse sans `explanation` date d'avant la séparation des IA : son texte vient de l'ancien résultat.
+          const fallback = m.explanation ?? m.text;
+          const text = await answerLocally(m.question ?? '', { sql: m.sql!, message: fallback }, result, scope, notes);
+          if (text === fallback && m.explanation === undefined) {
+            notes.push('Le texte ci-dessus a été rédigé avec les données précédentes ; le résultat ci-dessous est à jour.');
+          }
+          if (looksEmpty(result.rows)) notes.push('La requête ne renvoie aucun résultat.');
+          else if (result.truncated) notes.push('Résultat tronqué : seules les premières lignes sont affichées.');
+          notes.push(`Résultat actualisé le ${date}, sur les données et les filtres actuels.`);
+          updated.set(m.id, { ...m, text, result, notes, suggestions: undefined, computedAt: now, computedFilters: scope.labels });
+        } catch (e) {
+          updated.set(m.id, {
+            ...m,
+            notes: [...(m.notes ?? []), `Ce résultat n’a pas pu être actualisé : ${(e as Error).message}`],
+          });
+        }
+      }
+      setMessages((prev) => prev.map((m) => updated.get(m.id) ?? m));
+    });
   }
 
   async function run(task: () => Promise<void>) {
@@ -377,14 +454,11 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
   }
 
   function ask(question: string) {
-    const history = messages.slice(-10).map((m) => ({
-      role: m.role,
-      content: m.sql ? `${m.text}\n(SQL : ${m.sql})` : m.text,
-    }));
+    const history = historyFor(messages);
     push({ role: 'user', text: question });
     return run(async () => {
       const scope = await prepareScope();
-      const first = await planAndRun(question, history, scope, null);
+      const first = await planAndRun(question, history, scope);
       if (first) await resolveAndAnswer(question, history, scope, first.plan, first.result);
     });
   }
@@ -396,14 +470,17 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
     setMessages((prev) =>
       prev.map((x) => (x.id === m.id ? { ...x, suggestions: x.suggestions?.filter((y) => y !== s) } : x)),
     );
-    push({ role: 'user', text: `${s.columnName} : « ${option} »` });
+    // Valeur issue des données : affichée, mais jamais transmise à l'IA (ni maintenant ni dans l'historique).
+    push({ role: 'user', text: `${s.columnName} : « ${option} »`, local: true });
     return run(async () => {
-      const corrected = await applyCorrections(ctx.question, ctx.history, ctx.scope, ctx.plan, [
-        { columnId: s.columnId, requested: s.requested, actual: option },
-      ]);
+      const corrected = await applyCorrections(ctx.plan, [{ columnId: s.columnId, requested: s.requested, actual: option }]);
       if (corrected) await resolveAndAnswer(ctx.question, ctx.history, ctx.scope, corrected.plan, corrected.result);
     });
   }
+
+  const staleCount = messages.filter((m) =>
+    isStale(m, { dataUpdatedAt: meta.updatedAt, filters: filterLabels, savedAt: current?.updatedAt }),
+  ).length;
 
   async function pin(m: Message) {
     if (!m.sql || !dashboard) return;
@@ -487,6 +564,19 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
           {threadError && <p className="error small">{threadError}</p>}
         </div>
       )}
+      {staleCount > 0 && (
+        <div className="stale-banner" role="status">
+          <span>
+            {staleCount === 1
+              ? 'Un résultat de cette discussion a été calculé'
+              : `${staleCount} résultats de cette discussion ont été calculés`}{' '}
+            avant la dernière mise à jour des données ou avec d’autres filtres.
+          </span>
+          <button className="link" disabled={busy} onClick={() => void refreshResults()}>
+            Actualiser les résultats
+          </button>
+        </div>
+      )}
       <div className="chat-log">
         {messages.length === 0 && (
           <p className="muted small">
@@ -494,8 +584,20 @@ export function ChatPanel({ meta, dashboard }: { meta: DatasetMeta; dashboard?: 
           </p>
         )}
         {messages.map((m) => (
-          <div key={m.id} className={`msg ${m.role}${m.error ? ' error' : ''}`}>
+          <div
+            key={m.id}
+            className={`msg ${m.role}${m.error ? ' error' : ''}${m.unanswerable ? ' unanswerable' : ''}`}
+          >
+            {m.unanswerable && <div className="msg-label small">Impossible de répondre avec ces données</div>}
             <div className="msg-text">{m.text}</div>
+            {m.alternative && (
+              <div className="suggestions">
+                <span className="small muted">Question possible :</span>
+                <button className="chip" disabled={busy} onClick={() => void ask(m.alternative!)}>
+                  {m.alternative}
+                </button>
+              </div>
+            )}
             {m.suggestions?.map((sg) => (
               <div key={sg.columnId + sg.requested} className="suggestions">
                 <span className="small muted">

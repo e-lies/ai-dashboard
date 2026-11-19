@@ -109,6 +109,25 @@ describe('import de dashboard', () => {
     expect(w2!.sql).toBe(`SELECT "c1" AS "c0", SUM("c0") AS total FROM "dash_nouv" WHERE "c1" <> 'c1' GROUP BY 1`);
   });
 
+  it('conserve le sous-titre d’un indicateur', () => {
+    const kpi: DashboardSpec = {
+      ...dash,
+      widgets: [
+        {
+          id: 'k1',
+          title: 'Ventes',
+          kind: 'kpi',
+          subtitle: 'Ventes totales 2026',
+          suffix: '$',
+          query: { datasetId: 'src', filters: [], groupBy: [], measures: [{ id: 'm0', fn: 'sum', columnId: 'c1' }] },
+        },
+      ],
+    };
+    const w = importDashboard(roundTrip(kpi, source), target).widgets[0]!;
+    expect(w.subtitle).toBe('Ventes totales 2026');
+    expect(w.suffix).toBe('$');
+  });
+
   it('sur le même jeu, conserve les colonnes par id', () => {
     const d = importDashboard(roundTrip(dash, source), source, { newId: () => 'copie' });
     expect(d.globalFilters[0]!.columnId).toBe('c0');

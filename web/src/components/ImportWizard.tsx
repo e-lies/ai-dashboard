@@ -1,9 +1,10 @@
 /**
  * Assistant d'import : fichier → onglet et ligne d'en-tête → profilage
- * (heuristique puis IA) → validation du schéma → chargement.
+ * (heuristique, puis IA locale si elle est configurée) → validation du schéma → chargement.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ColumnSchema } from '../../../shared/types';
+import { api } from '../lib/api';
 import { buildDataset, profile, refineWithAi } from '../lib/importer';
 import { guessHeaderRow, readFile, toTable, type RawCell, type RawWorkbook } from '../lib/ingest';
 import { fmtInt } from '../lib/format';
@@ -28,6 +29,12 @@ export function ImportWizard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Modèle de l'IA locale ; l'analyse par IA n'est proposée que s'il y en a une (jamais l'IA infonuagique). */
+  const [localModel, setLocalModel] = useState<string | null>(null);
+
+  useEffect(() => {
+    void api.capabilities().then((c) => setLocalModel(c.localModel));
+  }, []);
 
   const sheet = wb?.sheets[sheetIdx];
   const table = useMemo(() => (sheet ? toTable(sheet.matrix, headerRow) : null), [sheet, headerRow]);
@@ -56,12 +63,12 @@ export function ImportWizard() {
     const heuristics = profile(table);
     setAmbiguous(new Set(heuristics.filter((h) => h.dateAmbiguous).map((h) => h.schema.id)));
     setColumns(heuristics.map((h) => h.schema));
-    if (!useAi) return;
-    setBusy('Analyse des colonnes par l’IA…');
+    if (!useAi || !localModel) return;
+    setBusy(`Analyse des colonnes par l’IA locale (${localModel})…`);
     try {
       setColumns(await refineWithAi(name, table, heuristics));
     } catch (e) {
-      setNotice(`L’analyse IA a échoué (${(e as Error).message}). Le typage heuristique est conservé.`);
+      setNotice(`L’analyse par l’IA locale a échoué (${(e as Error).message}). Le typage heuristique est conservé.`);
     } finally {
       setBusy(null);
     }
@@ -93,8 +100,11 @@ export function ImportWizard() {
     <div className="page">
       <h2>Importer des données</h2>
       <p className="muted">
-        Les données restent dans votre navigateur. Seuls les noms de colonnes et un court échantillon masqué (aucun pour
-        les colonnes sensibles) sont transmis à l’IA. Utilisez de préférence des fichiers sans renseignements personnels.
+        Les données restent dans votre navigateur.{' '}
+        {localModel
+          ? 'Pour l’analyse des colonnes, les noms et un court échantillon masqué (aucun pour les colonnes sensibles) sont transmis à l’IA locale du réseau interne. '
+          : 'L’analyse des colonnes se fait localement (aucune IA locale n’est configurée). '}
+        Le chatbot n’envoie au service infonuagique que le schéma : noms, types, rôles et descriptions des colonnes.
       </p>
 
       <input type="file" accept=".xlsx,.xls,.xlsm,.ods,.csv,.tsv,.txt" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
@@ -138,10 +148,12 @@ export function ImportWizard() {
                 }}
               />
             </label>
-            <label className="inline">
-              <input type="checkbox" checked={useAi} onChange={(e) => setUseAi(e.target.checked)} />
-              Analyse par l’IA
-            </label>
+            {localModel && (
+              <label className="inline" title={`Modèle local : ${localModel}`}>
+                <input type="checkbox" checked={useAi} onChange={(e) => setUseAi(e.target.checked)} />
+                Analyse par l’IA locale
+              </label>
+            )}
           </div>
 
           <p className="muted small">
@@ -183,7 +195,11 @@ export function ImportWizard() {
       {columns && (
         <section className="card">
           <h3>Schéma détecté</h3>
-          <p className="muted small">Vérifiez les types, les formats de date et les rôles avant d’importer.</p>
+          <p className="muted small">
+            Vérifiez les types, les formats de date et les rôles avant d’importer. Relisez aussi les descriptions : elles
+            sont transmises au service infonuagique avec le schéma et ne doivent contenir aucune donnée réelle. Vous
+            pourrez les modifier plus tard sur la page du jeu de données.
+          </p>
           <SchemaEditor columns={columns} onChange={setColumns} ambiguousDates={ambiguous} />
           <div className="actions">
             <button className="primary" disabled={!!busy} onClick={confirm}>

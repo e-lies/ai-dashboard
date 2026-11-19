@@ -23,8 +23,14 @@ export interface LiteralCheck {
 
 const distinctCache = new Map<string, Promise<string[]>>();
 
-function distinctValues(meta: DatasetMeta, col: ColumnSchema): Promise<string[]> {
-  // Les lignes d'un jeu de données ne changent pas après l'import.
+/** Oublie les valeurs distinctes en cache d'un jeu de données (après un remplacement de ses lignes). */
+export function forgetDistinctValues(datasetId: string): void {
+  for (const k of distinctCache.keys()) if (k.startsWith(`${datasetId}:`)) distinctCache.delete(k);
+}
+
+/** Valeurs distinctes non nulles d'une colonne, en texte (20 000 au plus), mises en cache. Le jeu doit être chargé. */
+export function distinctValues(meta: DatasetMeta, col: ColumnSchema): Promise<string[]> {
+  // Valable jusqu'au prochain remplacement des lignes (voir forgetDistinctValues).
   const key = `${meta.id}:${col.id}`;
   let p = distinctCache.get(key);
   if (!p) {

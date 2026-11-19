@@ -58,6 +58,8 @@ export interface DatasetMeta {
   rowCount: number;
   columns: ColumnSchema[];
   createdAt: string;
+  /** Date du dernier remplacement des données par un nouveau fichier. */
+  updatedAt?: string;
 }
 
 /** Valeur brute d'une cellule après normalisation. */
@@ -165,6 +167,10 @@ export interface WidgetSpec {
   sql?: string | null;
   /** Largeur dans la grille (1 à 4 colonnes). */
   span?: 1 | 2 | 3 | 4;
+  /** Indicateur : texte affiché sous la valeur. Absent ou vide : libellé de la mesure (ex. « Somme – Montant »). */
+  subtitle?: string | null;
+  /** Indicateur : unité affichée après la valeur, précédée d'une espace insécable (ex. « $ », « % », « kg »). */
+  suffix?: string | null;
 }
 
 export interface DashboardSpec {

@@ -82,6 +82,11 @@ export function ensureDashboardView(dashboardId: string, meta: DatasetMeta, filt
   return p;
 }
 
+/** Oublie les vues de dashboard déjà créées : elles seront recréées à la prochaine requête (ex. après un remplacement des lignes). */
+export function forgetDashboardViews(): void {
+  views.clear();
+}
+
 export function isLoaded(datasetId: string): boolean {
   return loaded.has(datasetId);
 }

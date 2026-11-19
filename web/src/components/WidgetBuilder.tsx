@@ -5,7 +5,7 @@
 import { nanoid } from 'nanoid';
 import { useState } from 'react';
 import type { AggFn, ColumnSchema, DatasetMeta, Filter, GroupBy, Measure, TimeGrain, WidgetKind, WidgetSpec } from '../../../shared/types';
-import { DEFAULT_GROUP_LIMIT } from '../lib/sql';
+import { DEFAULT_GROUP_LIMIT, measureLabel } from '../lib/sql';
 import { FilterEditor } from './FilterEditor';
 import { WidgetView } from './WidgetView';
 
@@ -37,6 +37,15 @@ const GRAINS: { value: TimeGrain; label: string }[] = [
 ];
 
 const isNumeric = (c: ColumnSchema) => c.type === 'number' || c.type === 'integer';
+
+/** Nombre maximal de regroupements : un tableau en accepte plusieurs, un graphique au plus deux (axe et série). */
+export const MAX_TABLE_GROUPS = 6;
+export function maxGroups(kind: WidgetKind): number {
+  if (kind === 'kpi') return 0;
+  if (kind === 'pie') return 1;
+  if (kind === 'table') return MAX_TABLE_GROUPS;
+  return 2;
+}
 
 function columnsForFn(cols: ColumnSchema[], fn: AggFn): ColumnSchema[] {
   const needs = FNS.find((f) => f.value === fn)?.needs;
@@ -108,11 +117,14 @@ export function WidgetBuilder({ meta, initial, globalFilters, onSave, onCancel }
   const setQuery = (patch: Partial<WidgetSpec['query']>) => setW({ ...w, query: { ...q, ...patch } });
 
   const rawMode = w.kind === 'table' && q.groupBy.length === 0 && q.measures.length === 0;
-  const maxDims = w.kind === 'kpi' ? 0 : w.kind === 'pie' ? 1 : 2;
+  const maxDims = maxGroups(w.kind);
   const singleMeasure = w.kind === 'pie' || w.kind === 'kpi';
+  // Une colonne déjà utilisée par un autre regroupement n'est pas reproposée.
   const dimCandidates = (index: number) =>
-    meta.columns.filter((c) =>
-      w.kind === 'timeline' && index === 0 ? c.type === 'date' : c.role !== 'text' && c.role !== 'measure',
+    meta.columns.filter(
+      (c) =>
+        (w.kind === 'timeline' && index === 0 ? c.type === 'date' : c.role !== 'text' && c.role !== 'measure') &&
+        !q.groupBy.some((g, j) => j !== index && g.columnId === c.id),
     );
 
   const setGroup = (i: number, g: GroupBy | null) => {
@@ -153,6 +165,38 @@ export function WidgetBuilder({ meta, initial, globalFilters, onSave, onCancel }
             ))}
           </select>
         </label>
+
+        {w.kind === 'kpi' && (
+          <label>
+            Sous-titre
+            <input
+              value={w.subtitle ?? ''}
+              maxLength={120}
+              placeholder={q.measures[0] ? measureLabel(q.measures[0], meta) : 'Libellé de la mesure'}
+              onChange={(e) => setW({ ...w, subtitle: e.target.value || null })}
+            />
+            <span className="hint">Texte affiché sous la valeur. Laissez vide pour le libellé de la mesure.</span>
+          </label>
+        )}
+
+        {w.kind === 'kpi' && (
+          <label>
+            Suffixe
+            <input
+              list="kpi-suffixes"
+              value={w.suffix ?? ''}
+              maxLength={20}
+              placeholder="ex. $, %, kg"
+              onChange={(e) => setW({ ...w, suffix: e.target.value || null })}
+            />
+            <datalist id="kpi-suffixes">
+              {['$', '%', 'k$', 'M$', 'kg', 't', 'h', 'min', 'km', 'L'].map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+            <span className="hint">Unité affichée après la valeur (ex. « 731,8 $ »). Vide : aucune unité.</span>
+          </label>
+        )}
 
         {w.kind === 'table' && (
           <label className="inline">
@@ -208,7 +252,9 @@ export function WidgetBuilder({ meta, initial, globalFilters, onSave, onCancel }
                           setGroup(i, c ? { columnId: c.id, timeGrain: c.type === 'date' ? 'month' : undefined } : null);
                         }}
                       >
-                        <option value="">{i === 0 ? '— choisir —' : '— aucune série —'}</option>
+                        <option value="">
+                          {i === 0 ? '— choisir —' : w.kind === 'table' ? '— aucun —' : '— aucune série —'}
+                        </option>
                         {dimCandidates(i).map((c) => (
                           <option key={c.id} value={c.id}>
                             {c.name}
@@ -230,6 +276,12 @@ export function WidgetBuilder({ meta, initial, globalFilters, onSave, onCancel }
                     </div>
                   );
                 })}
+                {w.kind === 'table' && (
+                  <p className="hint">
+                    Jusqu’à {MAX_TABLE_GROUPS} regroupements. Chaque colonne catégorielle est limitée à ses groupes
+                    principaux, selon le nombre maximal ci-dessous.
+                  </p>
+                )}
                 <label>
                   Nombre maximal de groupes
                   <input
@@ -306,7 +358,17 @@ export function WidgetBuilder({ meta, initial, globalFilters, onSave, onCancel }
 
       <div className="builder-preview">
         <h3>{w.title}</h3>
-        <WidgetView widget={w} meta={meta} globalFilters={globalFilters} showSql height={320} />
+        {w.kind === 'table' && (
+          <p className="hint">Cliquez sur un en-tête de colonne pour définir le tri par défaut du tableau.</p>
+        )}
+        <WidgetView
+          widget={w}
+          meta={meta}
+          globalFilters={globalFilters}
+          showSql
+          height={320}
+          onSortChange={(s) => setQuery({ sort: s ? [s] : undefined })}
+        />
       </div>
     </div>
   );

@@ -57,6 +57,8 @@ const WidgetZ = z.object({
   query: QueryZ,
   sql: z.string().max(20000).nullable().optional(),
   span: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  subtitle: z.string().max(300).nullable().optional(),
+  suffix: z.string().max(20).nullable().optional(),
 });
 
 const FileZ = z.object({

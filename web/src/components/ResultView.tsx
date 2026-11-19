@@ -3,8 +3,10 @@
  * Les `nDims` premières colonnes du résultat sont des dimensions, les suivantes des mesures.
  */
 import ReactECharts from 'echarts-for-react';
-import type { CellValue, QueryResult, WidgetKind } from '../../../shared/types';
-import { fmt } from '../lib/format';
+import { useMemo, useState } from 'react';
+import type { CellValue, QueryResult, SortSpec, WidgetKind } from '../../../shared/types';
+import { fmt, kpiText } from '../lib/format';
+import { nextSort, sortRows } from '../lib/tableSort';
 
 interface Props {
   kind: WidgetKind;
@@ -12,6 +14,16 @@ interface Props {
   /** Nombre de colonnes de dimension en tête du résultat. Déduit si absent. */
   nDims?: number;
   height?: number;
+  /**
+   * Tri piloté par le parent (tableaux) : le parent relance la requête triée, sur toutes les données.
+   * Sans `onSort`, le tri se fait ici, sur les lignes du résultat affiché.
+   */
+  sort?: SortSpec | null;
+  onSort?(sort: SortSpec | null): void;
+  /** Indicateur : sous-titre personnalisé, à la place du libellé de la mesure. */
+  subtitle?: string | null;
+  /** Indicateur : unité affichée après la valeur. */
+  suffix?: string | null;
 }
 
 /** Pour un résultat SQL libre : les premières colonnes non numériques sont des dimensions. */
@@ -110,8 +122,17 @@ function buildOption(kind: WidgetKind, result: QueryResult, nDims: number) {
   };
 }
 
-export function ResultView({ kind, result, nDims, height = 280 }: Props) {
+export function ResultView({ kind, result, nDims, height = 280, sort: controlledSort, onSort, subtitle, suffix }: Props) {
   const dims = nDims ?? inferDims(result);
+  const [localSort, setLocalSort] = useState<SortSpec | null>(null);
+  const sort = onSort ? (controlledSort ?? null) : localSort;
+  // En mode piloté, les lignes arrivent déjà triées par la requête.
+  const rows = useMemo(() => (onSort ? result.rows : sortRows(result.rows, localSort)), [onSort, result.rows, localSort]);
+  const toggleSort = (key: string) => {
+    const next = nextSort(sort, key);
+    if (onSort) onSort(next);
+    else setLocalSort(next);
+  };
 
   if (result.rows.length === 0) return <p className="muted">Aucun résultat.</p>;
 
@@ -119,8 +140,8 @@ export function ResultView({ kind, result, nDims, height = 280 }: Props) {
     const m = result.columns[dims] ?? result.columns[0];
     return (
       <div className="kpi">
-        <div className="kpi-value">{fmt(m ? (result.rows[0]?.[m.key] ?? null) : null)}</div>
-        <div className="kpi-label">{m?.label}</div>
+        <div className="kpi-value">{kpiText(m ? (result.rows[0]?.[m.key] ?? null) : null, suffix)}</div>
+        <div className="kpi-label">{subtitle?.trim() || m?.label}</div>
       </div>
     );
   }
@@ -135,13 +156,26 @@ export function ResultView({ kind, result, nDims, height = 280 }: Props) {
       <table className="data">
         <thead>
           <tr>
-            {result.columns.map((c) => (
-              <th key={c.key}>{c.label}</th>
-            ))}
+            {result.columns.map((c) => {
+              const active = sort?.by === c.key;
+              const numeric = result.rows.some((r) => typeof r[c.key] === 'number');
+              return (
+                <th
+                  key={c.key}
+                  className={`sortable${numeric ? ' num' : ''}`}
+                  aria-sort={active ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button className="th-sort" onClick={() => toggleSort(c.key)} title="Trier par cette colonne">
+                    {c.label}
+                    <span className="sort-mark">{active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+                  </button>
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
-          {result.rows.map((r, i) => (
+          {rows.map((r, i) => (
             <tr key={i}>
               {result.columns.map((c) => {
                 const v = r[c.key] ?? null;

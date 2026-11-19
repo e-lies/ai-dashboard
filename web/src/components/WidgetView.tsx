@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { DatasetMeta, Filter, QueryResult, WidgetSpec } from '../../../shared/types';
+import type { DatasetMeta, Filter, QueryResult, SortSpec, WidgetSpec } from '../../../shared/types';
 import { ensureDashboardView, runSpec, runUntrustedSql } from '../lib/db';
 import { dashboardViewName } from '../lib/sql';
 import { useApp } from '../store';
@@ -13,17 +13,33 @@ interface Props {
   showSql?: boolean;
   /** Dashboard hôte : les widgets SQL qui interrogent sa vue filtrée suivent ses filtres. */
   dashboardId?: string;
+  /**
+   * Fourni par l'éditeur de widget : le tri choisi en cliquant sur un en-tête devient le tri enregistré du widget.
+   * Sans lui (dashboard), le tri choisi ne vaut que pour l'affichage en cours.
+   */
+  onSortChange?(sort: SortSpec | null): void;
 }
 
-export function WidgetView({ widget, meta, globalFilters = [], height, showSql, dashboardId }: Props) {
+export function WidgetView({ widget, meta, globalFilters = [], height, showSql, dashboardId, onSortChange }: Props) {
   const viewName = dashboardId ? dashboardViewName(dashboardId) : null;
   const usesView = !!(widget.sql && viewName && widget.sql.includes(viewName));
   const dataVersion = useApp((s) => s.dataVersion);
   const ensureLoaded = useApp((s) => s.ensureLoaded);
   const [state, setState] = useState<{ result?: QueryResult; error?: string; loading: boolean }>({ loading: true });
 
+  // Tri des tableaux définis par spec : appliqué par DuckDB, donc sur toutes les données et non sur les lignes affichées.
+  // Les widgets SQL (réponses du chatbot) sont triés sur leur résultat, dans ResultView.
+  const savedSort = widget.query.sort?.[0] ?? null;
+  const savedSortKey = JSON.stringify(savedSort);
+  const [localSort, setLocalSort] = useState<SortSpec | null>(savedSort);
+  useEffect(() => setLocalSort(savedSort), [savedSortKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const specTable = widget.kind === 'table' && !widget.sql;
+  const sort = onSortChange ? savedSort : localSort;
+  const query = specTable ? { ...widget.query, sort: sort ? [sort] : undefined } : widget.query;
+  const changeSort = (s: SortSpec | null) => (onSortChange ? onSortChange(s) : setLocalSort(s));
+
   // La spec est sérialisée pour ne relancer la requête que si elle change réellement.
-  const key = JSON.stringify([widget.query, widget.sql, globalFilters, dataVersion]);
+  const key = JSON.stringify([query, widget.sql, globalFilters, dataVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,7 +50,7 @@ export function WidgetView({ widget, meta, globalFilters = [], height, showSql, 
         if (usesView) await ensureDashboardView(dashboardId!, meta, globalFilters);
         const result = widget.sql
           ? await runUntrustedSql(widget.sql)
-          : await runSpec(widget.query, meta, globalFilters);
+          : await runSpec(query, meta, globalFilters);
         if (!cancelled) setState({ result, loading: false });
       } catch (e) {
         if (!cancelled) setState({ error: (e as Error).message, loading: false });
@@ -56,6 +72,9 @@ export function WidgetView({ widget, meta, globalFilters = [], height, showSql, 
         result={state.result}
         nDims={widget.sql ? undefined : widget.query.groupBy.length}
         height={height}
+        subtitle={widget.subtitle}
+        suffix={widget.suffix}
+        {...(specTable ? { sort, onSort: changeSort } : {})}
       />
       {state.result.truncated && (
         <p className="hint">
