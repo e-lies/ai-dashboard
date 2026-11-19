@@ -13,11 +13,11 @@ export default defineConfig(({ mode }) => {
     server: {
       // Port fixe et strict : IndexedDB est propre à chaque origine (hôte + port).
       // Si Vite changeait de port, les jeux de données et dashboards enregistrés « disparaîtraient ».
-      host: 'localhost',
+      host: '0.0.0.0',
       port: webPort,
       strictPort: true,
       // Le frontend n'appelle jamais le LLM directement : tout passe par le proxy.
-      proxy: { '/api': `http://localhost:${apiPort}` },
+      proxy: { '/api': `http://0.0.0.0:${apiPort}` },
     },
     optimizeDeps: {
       // DuckDB-WASM charge ses propres workers et fichiers .wasm.
